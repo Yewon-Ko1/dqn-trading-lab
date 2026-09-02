@@ -52,7 +52,7 @@ df.dropna()                          # NaN 있는 행 제거
 ## 과제
 
 1. `features.py` 의 `# TODO` 6곳을 채운다.
-2. `python 01_features/check_01.py` 가 전부 `OK` 를 출력하면 통과.
+2. `python study/01_features/check_01.py` 가 전부 `OK` 를 출력하면 통과.
 3. `out/005930_features.csv` 를 열어서, 2020년 3월(코로나 급락) 근처의 `ret20`, `vol20`,
    `close_ma20_ratio` 값이 어떻게 생겼는지 `notes.md` 에 두세 줄 적는다.
 4. 기존 `backend/app/features.py` 를 열어 `close_ma20_ratio` 를 어디서 어떻게 계산하는지 찾아

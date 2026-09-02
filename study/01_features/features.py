@@ -1,12 +1,12 @@
 """01단계: OHLCV → 피처 테이블.
 
-lesson.md 를 먼저 읽는다. # TODO 를 채운 뒤  python 01_features/check_01.py  로 확인.
+lesson.md 를 먼저 읽는다. # TODO 를 채운 뒤  python study/01_features/check_01.py  로 확인.
 """
 from pathlib import Path
 
 import pandas as pd
 
-OUT = Path(__file__).resolve().parents[1] / "out"
+OUT = Path(__file__).resolve().parents[2] / "out"
 
 
 def load_ohlcv(path: Path) -> pd.DataFrame:

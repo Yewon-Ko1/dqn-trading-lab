@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+out/
+*.png
+*.csv
+!experiments.csv
+data/
+models/
+*.pt
+*.pth
+.DS_Store
+.vscode/
+.agents/

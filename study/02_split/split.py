@@ -1,6 +1,6 @@
 """02단계: 시간 순 분할 + walk-forward fold + 누수 없는 정규화.
 
-lesson.md 를 먼저 읽는다. # TODO 를 채운 뒤  python 02_split/check_02.py  로 확인.
+lesson.md 를 먼저 읽는다. # TODO 를 채운 뒤  python study/02_split/check_02.py  로 확인.
 """
 import pandas as pd
 
@@ -57,7 +57,7 @@ def fit_transform(train: pd.DataFrame, test: pd.DataFrame, cols: list[str]):
 
 if __name__ == "__main__":
     from pathlib import Path
-    feat = pd.read_csv(Path(__file__).resolve().parents[1] / "out" / "005930_features.csv",
+    feat = pd.read_csv(Path(__file__).resolve().parents[2] / "out" / "005930_features.csv",
                        parse_dates=["date"], index_col="date")
     tr, te = time_split(feat, "2024-01-01")
     print(f"학습 {tr.index[0].date()} ~ {tr.index[-1].date()} ({len(tr)}일)")
