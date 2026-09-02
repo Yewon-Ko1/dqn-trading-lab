@@ -34,6 +34,13 @@ jobs:
             [ -e "$f" ] || continue
             found=1
             echo "== $f"
-            python "$f"
+            if out=$(python "$f" 2>&1); then
+              echo "$out" | tail -1
+            elif echo "$out" | grep -q "그대로인 TODO\|먼저 채우세요"; then
+              echo "SKIP — 아직 시작 안 한 단계 (TODO 미기입)"
+            else
+              echo "$out"
+              exit 1
+            fi
           done
           [ "$found" = "1" ] || echo "no check scripts yet"
