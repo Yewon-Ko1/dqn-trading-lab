@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, study]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (light)
+        run: pip install numpy pandas
+
+      - name: Python syntax check
+        run: python -m compileall . -q
+
+      # 핵심: 문법 검사만 하지 않고, 존재하는 study check 스크립트를 전부 실행한다.
+      # check 스크립트는 합성 데이터로 돌아가므로 네트워크·데이터 파일이 필요 없다.
+      - name: Run study checks
+        run: |
+          found=0
+          for f in study/*/check_*.py; do
+            [ -e "$f" ] || continue
+            found=1
+            echo "== $f"
+            if out=$(python "$f" 2>&1); then
+              echo "$out" | tail -1
+            elif echo "$out" | grep -q "그대로인 TODO\|먼저 채우세요"; then
+              echo "SKIP — 아직 시작 안 한 단계 (TODO 미기입)"
+            else
+              echo "$out"
+              exit 1
+            fi
+          done
+          [ "$found" = "1" ] || echo "no check scripts yet"

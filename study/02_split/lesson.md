@@ -74,7 +74,7 @@ train.mean(), train.std()          # 컬럼별 평균/표준편차 (Series로 �
 2. `make_folds(df, years)` — 연도 리스트를 받아 (학습 3년, 테스트 1년) fold 목록 생성
 3. `fit_transform(train, test, cols)` — 학습 구간 통계로만 z-score, 둘 다 변환해 반환
 
-`python 02_split/check_02.py` 전부 OK면 통과. 검사 중에는 "테스트 구간 값을 바꿔도
+`python study/02_split/check_02.py` 전부 OK면 통과. 검사 중에는 "테스트 구간 값을 바꿔도
 학습 구간의 정규화 결과가 변하지 않는가"(누수 검사)도 있다.
 
 ## 자주 하는 실수
