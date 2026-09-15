@@ -7,6 +7,7 @@
 실행:  python study/00_data/get_data.py
 결과:  out/005930.csv
 """
+import argparse
 from pathlib import Path
 
 import FinanceDataReader as fdr  # pip install finance-datareader
@@ -14,15 +15,17 @@ import FinanceDataReader as fdr  # pip install finance-datareader
 OUT = Path(__file__).resolve().parents[2] / "out"
 OUT.mkdir(exist_ok=True)
 
-df = fdr.DataReader("005930", "2015-01-01")   # 삼성전자, 2015년부터 오늘까지
+ap = argparse.ArgumentParser(); ap.add_argument("--code", default="005930")
+code = ap.parse_args().code
+df = fdr.DataReader(code, "2015-01-01")   # 기본 삼성전자, --code 069500 은 KODEX200
 df = df.rename(columns=str.lower)              # Open→open, Close→close ...
 df.index.name = "date"
 df = df[["open", "high", "low", "close", "volume"]]
 
-df.to_csv(OUT / "005930.csv")
+df.to_csv(OUT / f"{code}.csv")
 print(df.head())
 print(df.tail())
-print(f"\n{len(df)}일치 저장 → {OUT / '005930.csv'}")
+print(f"\n{len(df)}일치 저장 → {OUT / (code + '.csv')}")
 
 # ── 스스로 답해 볼 것 (notes.md 에 적기) ─────────────────────────────
 # Q1. 행 하나는 무엇을 뜻하나? 주말/공휴일 행이 있나?

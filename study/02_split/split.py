@@ -51,7 +51,7 @@ def fit_transform(train: pd.DataFrame, test: pd.DataFrame, cols: list[str]):
     m = train[cols].mean()
     s = train[cols].std()
     train[cols] = (train[cols]-m)/s
-    test[cols] = (test[cols]-m/s)
+    test[cols] = (test[cols] - m) / s
     return train, test
 
 

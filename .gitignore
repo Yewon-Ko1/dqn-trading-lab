@@ -1,13 +1,15 @@
 .venv/
 __pycache__/
-out/
-*.png
-*.csv
-!experiments.csv
+.agents/
+# out 은 개별 관리: 실험 기록·요약·그림만 커밋
+out/*
+!out/experiments.csv
+!out/summary.md
+!out/tuning.csv
+!out/fig_*.png
 data/
 models/
 *.pt
 *.pth
 .DS_Store
 .vscode/
-.agents/
