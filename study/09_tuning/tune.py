@@ -128,7 +128,8 @@ def summarize(df, label):
     print(f"  종합: 초과 {exc_m:+.2%} ± {exc_s:.2%}  |  시드 표준편차(연도 내 평균) "
           f"{g['ret'].std().mean():.2%}  |  거래 {df['trades'].mean():.0f}회")
     per_fold = {int(y): gy["excess_bh"].mean() for y, gy in g}
-    return exc_m, exc_s, per_fold
+    seed_sd = g["ret"].std().mean()          # 연도 내 시드 std 의 평균 (폴드 간 차이는 제외)
+    return exc_m, seed_sd, per_fold, df["trades"].mean()
 
 
 def main():
@@ -171,19 +172,20 @@ def main():
             setattr(args, param, caster(v))
             print(f"\n===== {param} = {v} =====")
             df = run_config(feat, args, args.years, args.seeds, args.code)
-            results.append((v, *summarize(df, f"{param}={v}")))
+            results.append((v, *summarize(df, f"{param}={v}")))   # (값, 평균초과, 시드std, 폴드별, 거래)
         # ── 폴드별 순위 집계 (변동 큰 폴드가 평균을 지배하는 것을 보완) ──
         years_ = sorted(results[0][3])
-        ranks = {v: [] for v, *_ in results}
+        ranks = {r[0]: [] for r in results}
         for y in years_:
             order = sorted(results, key=lambda r: -r[3][y])          # 초과 높은 순
             for rank, r in enumerate(order, 1):
                 ranks[r[0]].append(rank)
         print(f"\n{'='*60}\n스윕 결과 ({param}) — 규칙: ①평균 초과(동률 ±3%p) ②폴드 순위 ③시드 std ④기본값 유지")
-        print(f"  {'값':>8} | {'평균 초과':>10} | {'시드 std':>8} | 폴드별 초과 " + " ".join(f"{y}" for y in years_) + " | 순위평균")
-        for v, m, sd, pf in results:
+        print(f"  {'값':>8} | {'평균 초과':>10} | {'시드 std':>8} | 폴드별 초과 " + " ".join(f"{y}" for y in years_) + " | 순위평균 | 거래/년")
+        for v, m, sd, pf, tr in results:
             pfs = " ".join(f"{pf[y]:+.1%}" for y in years_)
-            print(f"  {str(v):>8} | {m:+10.2%} | {sd:8.2%} | {pfs} | {sum(ranks[v])/len(ranks[v]):.2f}")
+            print(f"  {str(v):>8} | {m:+10.2%} | {sd:8.2%} | {pfs} | {sum(ranks[v])/len(ranks[v]):8.2f} | {tr:5.0f}")
+        print("  (시드 std = 연도 내 시드 표준편차의 평균. 폴드 간 수익률 차이는 포함하지 않음)")
         print("→ 기본값 대비 평균 초과 +3%p 이상 & 3폴드 중 2폴드 이상 개선 & 2018(하락) 초과 비악화 → 변경. 아니면 기본값 유지.")
         print("→ 결과를 decisions.md 에 기록할 것.")
     print(f"\n전체 기록: {CSV}")
