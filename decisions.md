@@ -155,7 +155,11 @@
     분할 후 20일간 volume_ma20_ratio 가 최대 17.0 으로 왜곡 → 분할 전 거래량 ×50. ② 분할 전 매매정지 3일(04-30·05-02·05-03,
     시가·거래량 0) 행 제거. 둘 다 2018 검증 폴드에 걸려 있었으나 D-01·D-02 의 후보들에 동일하게 적용된 왜곡이라 결정은 유지.
   룩어헤드·NaN·스케일 검사: `python study/01_features/check_extra.py`.
-- **실험**: `python study/09_tuning/tune.py --window 10 --sweep features slim5 base8 plus10 structure market [market_vk] [flow]`
+- **데이터 확보 결과 (09-15)**: KOSPI(FDR) ✓, 투자자별 순매수(pykrx·KRX 로그인) ✓ 2013~ 전 기간, VKOSPI ✗ — pykrx 지수 목록에
+  파생상품지수가 없어 미확보 → **market_vk 는 이번 논문에서 제외**, 10월 후보(KRX 사이트 CSV 직접 수집)로 넘김.
+- **무효 실행 2건**: ① 09-15 15:00~15:37 slim5/base8/plus10 (데이터 갱신 전, 2015-03-31 시작 CSV). ② 09-15 16:22~17:09 5세트
+  (get_data 실패 상태의 2014-06 시작·분할 미보정 CSV로 실행). 둘 다 tuning.csv 에 남아 있으나 D-03 결정에 쓰지 않는다.
+- **실험**: `python study/09_tuning/tune.py --window 10 --sweep features slim5 base8 plus10 structure market flow`
 - **결과**: (실행 후 기입)
 
   | 세트 | 평균 초과 | 순위평균 | 시드 std(연도 내) | 2018 초과 | 2019 초과 | 2020 초과 | 거래/년 | 규칙 5 통과 |

@@ -7,6 +7,9 @@ out/*
 !out/experiments_*.csv
 !out/summary.md
 !out/tuning.csv
+!out/kospi.csv
+!out/vkospi.csv
+!out/*_flow.csv
 !out/fig_*.png
 data/
 models/
