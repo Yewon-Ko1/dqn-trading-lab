@@ -11,7 +11,7 @@
   python study/09_tuning/tune.py --episodes 20
   python study/09_tuning/tune.py --sweep episodes 10 20 40    # 한 변수 스윕
   python study/09_tuning/tune.py --sweep window 10 20 60
-  python study/09_tuning/tune.py --sweep features slim5 base8 plus10
+  python study/09_tuning/tune.py --window 10 --sweep features slim5 base8 plus10 structure market flow
   python study/09_tuning/tune.py --sweep hidden 32 64 128
   python study/09_tuning/tune.py --sweep lr 3e-4 1e-3 3e-3
   python study/09_tuning/tune.py --sweep gamma 0.95 0.99 0.995
@@ -43,11 +43,16 @@ COLS = ["time", "code", "test_year", "seed",
         "target_every", "eps_decay",
         "ret", "excess_bh", "sortino", "mdd", "trades"]
 
-# ── 피처 세트 정의 ─────────────────────────────────────────────
+# ── 피처 세트 정의 (D-03 사전 등록, decisions.md 참고) ─────────────
+# structure/market/market_vk/flow 컬럼은 study/01_features/extra_features.py 가 만든다.
 FSETS = {
     "slim5": ["ret1", "ret5", "close_ma20_ratio", "vol20", "volume_ma20_ratio"],
     "base8": FEATURES,                          # 현행 8종 (기준)
-    "plus10": FEATURES + ["rsi14", "macd_ratio"],
+    "plus10": FEATURES + ["rsi14", "macd_ratio"],                              # 기술지표 추가 (중복 계열)
+    "structure": FEATURES + ["close_ma200_ratio", "close_hi252_ratio", "vol5_vol20", "hl_range"],  # 장기 국면·일중
+    "market": FEATURES + ["kospi_ret5", "kospi_ret20", "rel20"],               # 시장 국면
+    "market_vk": FEATURES + ["kospi_ret5", "kospi_ret20", "rel20", "vkospi_ma20_ratio"],  # + 공포지수 (vkospi.csv 필요)
+    "flow": FEATURES + ["frgn5", "frgn20", "inst20"],                           # 외국인·기관 수급 (<code>_flow.csv 필요)
 }
 
 
@@ -171,7 +176,16 @@ def main():
                        parse_dates=["date"], index_col="date")
     feat = add_extra_features(feat)         # plus10 컬럼 추가 (다른 세트에는 영향 없음)
 
+    def check_set(name):
+        missing = [c for c in FSETS[name] if c not in feat.columns]
+        if missing:
+            raise SystemExit(f"피처 세트 {name}: 컬럼 없음 {missing} — study/01_features/extra_features.py 를 먼저 실행")
+        nan = feat[FSETS[name]].isna().sum()
+        if nan.any():
+            raise SystemExit(f"피처 세트 {name}: NaN 있음\n{nan[nan > 0]}")
+
     if args.sweep is None:
+        check_set(args.features)
         df = run_config(feat, args, args.years, args.seeds, args.code)
         summarize(df, f"{args.features} w{args.window} h{args.hidden} "
                       f"lr{args.lr} γ{args.gamma} ep{args.episodes}")
@@ -180,6 +194,9 @@ def main():
         caster = {"episodes": int, "window": int, "hidden": int,
                   "lr": float, "gamma": float, "target_every": int,
                   "eps_decay": float, "features": str}[param]
+        if param == "features":
+            for v in values:
+                check_set(v)
         results = []
         for v in values:
             setattr(args, param, caster(v))
