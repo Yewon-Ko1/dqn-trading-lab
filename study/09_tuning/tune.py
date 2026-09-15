@@ -12,13 +12,18 @@
   python study/09_tuning/tune.py --sweep episodes 10 20 40    # 한 변수 스윕
   python study/09_tuning/tune.py --sweep window 10 20 60
   python study/09_tuning/tune.py --window 10 --sweep features slim5 base8 plus10 structure market flow
+  python study/09_tuning/tune.py --resume --window 10 --sweep features slim3 slim7 slim5_vol slim5_us core8   # D-03b
   python study/09_tuning/tune.py --sweep hidden 32 64 128
   python study/09_tuning/tune.py --sweep lr 3e-4 1e-3 3e-3
   python study/09_tuning/tune.py --sweep gamma 0.95 0.99 0.995
+  python study/09_tuning/tune.py --resume --sweep features ...   # 중단된 스윕 이어 돌리기 (완료된 실행은 건너뜀)
+  python study/09_tuning/tune.py --resume --window 10 --features slim5 --sweep train_len 3 5 0     # D-03.7 학습 구간
+  python study/09_tuning/tune.py --resume --window 10 --features slim5 --sweep churn none state hold3 hold10   # D-03.5
 
 산출물: out/tuning.csv (전 실행 기록), 실행 끝에 설정별 요약표 출력.
 """
 import argparse
+import hashlib
 import random
 import sys
 from datetime import datetime
@@ -41,7 +46,32 @@ CSV = ROOT / "out" / "tuning.csv"
 COLS = ["time", "code", "test_year", "seed",
         "episodes", "window", "features", "hidden", "lr", "gamma",
         "target_every", "eps_decay",
-        "ret", "excess_bh", "sortino", "mdd", "trades"]
+        "ret", "excess_bh", "sortino", "mdd", "trades", "data_hash", "train_len", "churn"]
+CFG_KEYS = ["episodes", "window", "features", "hidden", "lr", "gamma", "target_every", "eps_decay",
+            "train_len", "churn"]
+
+# D-03.5 잦은 매매 변형: (extra_state, min_hold)
+CHURN = {"none": (False, 0), "state": (True, 0), "hold3": (False, 3), "hold10": (False, 10),
+         "hold20": (False, 20), "both": (True, 3)}
+
+
+def data_fingerprint(code: str) -> str:
+    """features CSV 의 내용 해시 앞 10자리. 데이터가 바뀌면 값이 바뀌어 옛 행을 재사용하지 않게 한다."""
+    return hashlib.md5((ROOT / "out" / f"{code}_features.csv").read_bytes()).hexdigest()[:10]
+
+
+def load_log() -> pd.DataFrame:
+    """tuning.csv 를 읽는다. 열이 추가된 뒤의 옛 파일(data_hash 없음)은 빈 값으로 채워 형식을 맞춘다."""
+    if not CSV.exists():
+        return pd.DataFrame(columns=COLS)
+    df = pd.read_csv(CSV)
+    if list(df.columns) != COLS:
+        for c in COLS:
+            if c not in df.columns:
+                df[c] = np.nan
+        df = df[COLS]
+        df.to_csv(CSV, index=False)          # 형식 통일 (내용은 그대로)
+    return df
 
 # ── 피처 세트 정의 (D-03 사전 등록, decisions.md 참고) ─────────────
 # structure/market/market_vk/flow 컬럼은 study/01_features/extra_features.py 가 만든다.
@@ -53,6 +83,16 @@ FSETS = {
     "market": FEATURES + ["kospi_ret5", "kospi_ret20", "rel20"],               # 시장 국면
     "market_vk": FEATURES + ["kospi_ret5", "kospi_ret20", "rel20", "vkospi_ma20_ratio"],  # + 공포지수 (vkospi.csv 필요)
     "flow": FEATURES + ["frgn5", "frgn20", "inst20"],                           # 외국인·기관 수급 (<code>_flow.csv 필요)
+    # ── D-03b (2라운드, 09-15 사전 등록) ──
+    "slim3": ["ret1", "ret5", "vol20"],                                          # 대조군: 최소 표현 (TDQN 식)
+    "slim7": ["ret1", "ret5", "close_ma20_ratio", "vol20", "volume_ma20_ratio",
+              "close_ma200_ratio", "close_hi252_ratio"],                         # slim5 + 장기 국면 (1라운드 structure 패턴)
+    "slim5_vol": ["ret1", "ret5", "close_ma20_ratio", "vol20", "volume_ma20_ratio",
+                  "vol_regime", "z_ret", "atr14_ratio"],                         # slim5 + 변동성 국면 (FinRL 터뷸런스·KAIS ATR)
+    "slim5_us": ["ret1", "ret5", "close_ma20_ratio", "vol20", "volume_ma20_ratio",
+                 "sp_ret1", "sp_ret5"],                                          # slim5 + 미국 지수 t-1 (KAIS 2021, sp500.csv 필요)
+    "core8": ["ret1", "ret5", "close_ma20_ratio", "vol20", "volume_ma20_ratio",
+              "close_ma200_ratio", "frgn20", "hl_range"],                        # 계열별 대표 1개 (flow.csv 필요)
 }
 
 
@@ -72,7 +112,7 @@ def add_extra_features(feat: pd.DataFrame) -> pd.DataFrame:
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     out["macd_ratio"] = (ema12 - ema26) / close
-    return out.dropna()
+    return out.dropna(subset=["rsi14", "macd_ratio"])   # 다른 세트의 NaN(선택 열) 때문에 시작 행이 바뀌지 않도록
 
 
 def with_warmup(feat: pd.DataFrame, test_df: pd.DataFrame, n: int) -> pd.DataFrame:
@@ -89,7 +129,8 @@ def with_warmup(feat: pd.DataFrame, test_df: pd.DataFrame, n: int) -> pd.DataFra
 def run_one(train_df, test_df, seed, cfg, feat):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     fcols = FSETS[cfg.features]
-    env = TradingEnv(train_df, window=cfg.window, features=fcols)
+    extra_state, min_hold = CHURN[cfg.churn]
+    env = TradingEnv(train_df, window=cfg.window, features=fcols, extra_state=extra_state, min_hold=min_hold)
     agent = DQNAgent(state_dim=len(env.reset()), gamma=cfg.gamma, lr=cfg.lr,
                      hidden=cfg.hidden, target_every=cfg.target_every,
                      eps_decay=cfg.eps_decay)
@@ -102,7 +143,7 @@ def run_one(train_df, test_df, seed, cfg, feat):
             agent.train_step()
             s = s2
     test_ext = with_warmup(feat, test_df, cfg.window)           # 워밍업 window 일 + 테스트 연도 전체
-    test_env = TradingEnv(test_ext, window=cfg.window, features=fcols)
+    test_env = TradingEnv(test_ext, window=cfg.window, features=fcols, extra_state=extra_state, min_hold=min_hold)
     s, done = test_env.reset(), False
     pv = [test_env.asset]                                        # t=window = 테스트 연도 첫 거래일
     while not done:
@@ -113,27 +154,44 @@ def run_one(train_df, test_df, seed, cfg, feat):
     return pv, test_env.trades
 
 
-def run_config(feat, cfg, years, seeds, code):
+def run_config(feat, cfg, years, seeds, code, data_hash, resume=False):
+    """설정 하나를 years × seeds 로 실행. resume=True 면 같은 설정·데이터로 이미 기록된 (연도, 시드) 는 건너뛰고 그 행을 재사용."""
+    done = pd.DataFrame(columns=COLS)
+    if resume:
+        log = load_log()
+        same = (log["code"].astype(str).str.zfill(6) == str(code).zfill(6)) & (log["data_hash"] == data_hash)  # CSV 는 앞 0 을 잃는다
+        for k in CFG_KEYS:
+            same &= log[k].astype(str) == str(getattr(cfg, k))
+        done = log[same].drop_duplicates(subset=["test_year", "seed"], keep="last")
+        if len(done):
+            print(f"  (resume) 기록된 {len(done)}개 실행 재사용")
     rows = []
-    folds = {te.index[0].year: (tr, te) for tr, te in make_folds(feat, years)}
+    train_len = 30 if cfg.train_len == 0 else cfg.train_len      # 0 = 가용 전체 (2013~)
+    folds = {te.index[0].year: (tr, te) for tr, te in make_folds(feat, years, train_len=train_len)}
     for year, (train_df, test_df) in folds.items():
         bh_ret = cumulative_return(buy_and_hold_pv(test_df["close"]))
         for seed in seeds:
+            if ((done["test_year"] == year) & (done["seed"] == seed)).any():
+                continue
             pv, trades = run_one(train_df, test_df, seed, cfg, feat)
             ret = cumulative_return(pv)
-            rows.append({"time": datetime.now().strftime("%m-%d %H:%M"), "code": code,
-                         "test_year": year, "seed": seed,
-                         "episodes": cfg.episodes, "window": cfg.window,
-                         "features": cfg.features, "hidden": cfg.hidden,
-                         "lr": cfg.lr, "gamma": cfg.gamma,
-                         "target_every": cfg.target_every, "eps_decay": cfg.eps_decay,
-                         "ret": round(ret, 4), "excess_bh": round(ret - bh_ret, 4),
-                         "sortino": round(sortino(pv), 3),
-                         "mdd": round(max_drawdown(pv), 4), "trades": trades})
+            row = {"time": datetime.now().strftime("%m-%d %H:%M"), "code": code,
+                   "test_year": year, "seed": seed,
+                   "episodes": cfg.episodes, "window": cfg.window,
+                   "features": cfg.features, "hidden": cfg.hidden,
+                   "lr": cfg.lr, "gamma": cfg.gamma,
+                   "target_every": cfg.target_every, "eps_decay": cfg.eps_decay,
+                   "ret": round(ret, 4), "excess_bh": round(ret - bh_ret, 4),
+                   "sortino": round(sortino(pv), 3),
+                   "mdd": round(max_drawdown(pv), 4), "trades": trades, "data_hash": data_hash,
+                   "train_len": cfg.train_len, "churn": cfg.churn}
+            pd.DataFrame([row], columns=COLS).to_csv(CSV, mode="a", header=not CSV.exists(), index=False)  # 한 줄씩 즉시 기록
+            rows.append(row)
             print(f"  [{year}] seed {seed}: {ret:+.2%} (초과 {ret - bh_ret:+.2%}, 거래 {trades})")
-    df = pd.DataFrame(rows, columns=COLS)
-    df.to_csv(CSV, mode="a", header=not CSV.exists(), index=False)
-    return df
+    new = pd.DataFrame(rows, columns=COLS)
+    out = pd.concat([done, new], ignore_index=True) if len(done) else new
+    out = out[out["test_year"].isin(years) & out["seed"].isin(seeds)]
+    return out.sort_values(["test_year", "seed"]).reset_index(drop=True)
 
 
 def summarize(df, label):
@@ -144,7 +202,7 @@ def summarize(df, label):
         print(f"  {y}: 초과 {gy['excess_bh'].mean():+.2%} ± {gy['excess_bh'].std():.2%} "
               f"(승률 {(gy['excess_bh'] > 0).sum()}/{len(gy)})  MDD {gy['mdd'].mean():.2%}")
     print(f"  종합: 초과 {exc_m:+.2%} ± {exc_s:.2%}  |  시드 표준편차(연도 내 평균) "
-          f"{g['ret'].std().mean():.2%}  |  거래 {df['trades'].mean():.0f}회")
+          f"{g['ret'].std().mean():.2%}  |  거래 {df['trades'].mean():.0f}회  |  거래 0회(퇴화) {(df['trades'] == 0).sum()}/{len(df)}")
     per_fold = {int(y): gy["excess_bh"].mean() for y, gy in g}
     seed_sd = g["ret"].std().mean()          # 연도 내 시드 std 의 평균 (폴드 간 차이는 제외)
     return exc_m, seed_sd, per_fold, df["trades"].mean()
@@ -164,9 +222,15 @@ def main():
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--target-every", type=int, default=500)
     ap.add_argument("--eps-decay", type=float, default=0.999)
+    ap.add_argument("--train-len", type=int, default=3,
+                    help="학습 구간 연수 (D-03.7). 0 = 가용 전체(2013~). 기본 3")
+    ap.add_argument("--churn", choices=list(CHURN), default="none",
+                    help="D-03.5 잦은 매매 변형: none | state(보유일수·손익 상태) | hold3 | hold10 | hold20 | both")
     ap.add_argument("--sweep", nargs="+", default=None,
                     metavar=("PARAM", "VALUES"),
                     help="예: --sweep episodes 10 20 40 (그 외 인자는 고정값으로 사용)")
+    ap.add_argument("--resume", action="store_true",
+                    help="같은 설정·같은 데이터로 이미 tuning.csv 에 기록된 (연도, 시드) 는 건너뛴다 — 중단된 스윕 이어 돌리기")
     args = ap.parse_args()
 
     if any(y >= 2021 for y in args.years):
@@ -175,6 +239,9 @@ def main():
     feat = pd.read_csv(ROOT / "out" / f"{args.code}_features.csv",
                        parse_dates=["date"], index_col="date")
     feat = add_extra_features(feat)         # plus10 컬럼 추가 (다른 세트에는 영향 없음)
+    data_hash = data_fingerprint(args.code)
+    load_log()                              # 옛 형식 파일이면 열을 맞춰 둔다
+    print(f"데이터 지문 {data_hash} ({args.code}_features.csv)")
 
     def check_set(name):
         missing = [c for c in FSETS[name] if c not in feat.columns]
@@ -186,14 +253,15 @@ def main():
 
     if args.sweep is None:
         check_set(args.features)
-        df = run_config(feat, args, args.years, args.seeds, args.code)
+        df = run_config(feat, args, args.years, args.seeds, args.code, data_hash, args.resume)
         summarize(df, f"{args.features} w{args.window} h{args.hidden} "
                       f"lr{args.lr} γ{args.gamma} ep{args.episodes}")
     else:
         param, *values = args.sweep
         caster = {"episodes": int, "window": int, "hidden": int,
                   "lr": float, "gamma": float, "target_every": int,
-                  "eps_decay": float, "features": str}[param]
+                  "eps_decay": float, "features": str,
+                  "train_len": int, "churn": str}[param]
         if param == "features":
             for v in values:
                 check_set(v)
@@ -201,7 +269,7 @@ def main():
         for v in values:
             setattr(args, param, caster(v))
             print(f"\n===== {param} = {v} =====")
-            df = run_config(feat, args, args.years, args.seeds, args.code)
+            df = run_config(feat, args, args.years, args.seeds, args.code, data_hash, args.resume)
             results.append((v, *summarize(df, f"{param}={v}")))   # (값, 평균초과, 시드std, 폴드별, 거래)
         # ── 폴드별 순위 집계 (변동 큰 폴드가 평균을 지배하는 것을 보완) ──
         years_ = sorted(results[0][3])

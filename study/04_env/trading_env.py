@@ -15,11 +15,18 @@ class TradingEnv:
     def __init__(self, df: pd.DataFrame, window: int = 20,
                  balance: int = 10_000_000,
                  commission: float = 0.00015, tax: float = 0.0025,
-                 features: list | None = None):
+                 features: list | None = None,
+                 extra_state: bool = False, min_hold: int = 0):
         """df: FEATURES 컬럼 + 'close' 컬럼을 가진 DataFrame (01~02단계 산출물)
 
         features: 사용할 피처 컬럼 목록. None 이면 기본 FEATURES 8종 (기존 동작 그대로).
         09단계 튜닝에서 피처 세트를 바꿔 비교할 때만 지정한다.
+
+        D-03.5 (잦은 매매) 옵션 — 기본값이면 기존 동작과 완전히 같다:
+          extra_state: True 면 상태 벡터 끝에 2개 추가 → [보유일수/20, 진입가 대비 손익률].
+                       에이전트가 "방금 샀다"를 보고 되팔기 비용을 스스로 배우게 하는 부드러운 방식.
+          min_hold:    매수 후 이 거래일 수가 지나기 전에는 SELL 을 HOLD 로 처리(액션 마스킹).
+                       되팔기를 막는 딱딱한 방식. 0 이면 제약 없음.
         """
         cols = FEATURES if features is None else list(features)
         self.features = df[cols].values.astype(np.float32)      # (일수, 피처수)
@@ -28,6 +35,8 @@ class TradingEnv:
         self.init_balance = balance
         self.commission = commission
         self.tax = tax
+        self.extra_state = extra_state
+        self.min_hold = min_hold
 
     # ── 에피소드 시작 ────────────────────────────────────────────
     def reset(self):
@@ -40,6 +49,8 @@ class TradingEnv:
         self.shares = 0;
         self.asset = self.init_balance
         self.trades = 0;
+        self.hold_days = 0            # 현재 포지션 보유 거래일 수 (D-03.5)
+        self.entry_price = 0.0        # 현재 포지션 진입가 (D-03.5)
         return self._obs()
 
     # ── state 만들기 ────────────────────────────────────────────
@@ -52,12 +63,18 @@ class TradingEnv:
         pos = np.array([self.shares * self.prices[self.t] / self.asset, 
                         self.asset / self.init_balance - 1, 
                         self.balance / self.init_balance], dtype=np.float32)
+        if self.extra_state:                                   # D-03.5: 자기 상태 2개
+            pnl = self.prices[self.t] / self.entry_price - 1 if self.shares > 0 else 0.0
+            pos = np.concatenate([pos, np.array([self.hold_days / 20.0, pnl], dtype=np.float32)])
         return np.concatenate([win, pos])
 
     # ── 하루 진행 ────────────────────────────────────────────────
     def step(self, action: int):
         """행동 집행 → 하루 전진 → 보상 계산. 반환: (새 state, reward, done)"""
         price = self.prices[self.t]
+
+        if action == self.SELL and self.shares > 0 and self.hold_days < self.min_hold:
+            action = self.HOLD                                 # D-03.5: 최소 보유기간 마스킹
 
         if action == self.BUY:
             # TODO 3. 현금으로 살 수 있는 주식 수 n 을 구해 매수하라.
@@ -66,6 +83,8 @@ class TradingEnv:
             #   n == 0 이면 아무 일도 하지 않는다 (액션 마스킹)
             n = int(self.balance // (price * (1 + self.commission)))
             if n > 0:
+                if self.shares == 0:                           # 새 포지션 진입 (D-03.5 추적)
+                    self.entry_price, self.hold_days = price, 0
                 self.balance -= n * price * ( 1 + self.commission)
                 self.shares += n
                 self.trades += 1
@@ -82,10 +101,13 @@ class TradingEnv:
                 self.balance += self.shares * price * (1 - self.commission - self.tax)
                 self.shares =0 
                 self. trades += 1
+                self.hold_days, self.entry_price = 0, 0.0
 
         # (HOLD 는 아무 것도 안 함)
 
         self.t += 1                                   # 하루 전진
+        if self.shares > 0:
+            self.hold_days += 1
         new_asset = self.balance + self.shares * self.prices[self.t]
 
         # TODO 5. 보상과 상태 갱신:

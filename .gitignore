@@ -9,6 +9,7 @@ out/*
 !out/tuning.csv
 !out/kospi.csv
 !out/vkospi.csv
+!out/sp500.csv
 !out/*_flow.csv
 !out/fig_*.png
 data/

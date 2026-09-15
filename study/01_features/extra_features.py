@@ -1,27 +1,31 @@
 """01단계 (추가): D-03 피처 세트용 확장 피처. 빈칸 없음.
 
 입력:  out/<code>_features.csv (01 features.py 산출물, OHLCV + base8)
-       out/kospi.csv, (선택) out/vkospi.csv, (선택) out/<code>_flow.csv   ← 00 get_extra.py
+       out/<code>.csv (원본 OHLCV — 장기 피처 워밍업용)
+       out/kospi.csv, (선택) out/sp500.csv, out/vkospi.csv, out/<code>_flow.csv   ← 00 get_extra.py
 출력:  out/<code>_features.csv 에 컬럼을 덧붙여 덮어쓴다 (base8 값은 그대로).
 
 실행:  python study/01_features/extra_features.py [--code 005930]
-검사:  python study/01_features/check_extra.py     (룩어헤드·NaN·스케일)
+검사:  python study/01_features/check_extra.py     (룩어헤드·NaN·스케일·미국 지수 정렬)
 
 모든 피처는 비율형(가격 단위 무관)이고 t 일 값은 t 일까지의 데이터만 쓴다.
 
-  [structure — 가격 구조, 장기 국면]
+  [structure — 가격 구조, 장기 국면]  (D-03 1라운드)
     close_ma200_ratio : close / MA200 - 1        200일선 이격도 — 강세/약세 국면의 고전적 기준
-    close_hi252_ratio : close / max(close,252) - 1   52주 고점 대비 위치 (항상 ≤ 0) — "고점에서 얼마나 내려왔나"
-    vol5_vol20        : std5(ret1) / std20(ret1) - 1   단기 변동성 급변 — 하락 초기에 튀는 경향
-    hl_range          : (high - low) / close      일중 변동폭 — 종가만 쓰는 base8 이 버리는 정보
-  [market — 시장 국면]
-    kospi_ret5, kospi_ret20 : KOSPI 5·20일 수익률
-    rel20                   : ret20 - kospi_ret20   시장 대비 상대강도
-  [market_vk] (vkospi.csv 있을 때만)
-    vkospi_ma20_ratio : VKOSPI / MA20(VKOSPI) - 1   공포지수의 평균 대비 수준
-  [flow] (<code>_flow.csv 있을 때만)
-    frgn5, frgn20 : 외국인 순매수금액 5·20일 합 / 거래대금(close×volume) 같은 기간 합
-    inst20        : 기관 순매수금액 20일 합 / 거래대금 20일 합
+    close_hi252_ratio : close / max(close,252) - 1   52주 고점 대비 위치 (항상 ≤ 0)
+    vol5_vol20        : std5(ret1) / std20(ret1) - 1   단기 변동성 급변
+    hl_range          : (high - low) / close      일중 변동폭
+  [market — 시장 국면]  (1라운드)
+    kospi_ret5, kospi_ret20, rel20 (= ret20 - kospi_ret20, 상대강도)
+  [vol — 변동성 국면]  (2라운드, FinRL 터뷸런스 지수의 단일 종목판 + KAIS 2021 의 ATR)
+    vol_regime  : std20(ret1) / std250(ret1) - 1   단기 변동성이 1년 평균 대비 얼마나 높은가
+    z_ret       : ret1 / std20(ret1)               표준화 일간 수익률 — 오늘이 몇 σ 짜리 날인가
+    atr14_ratio : ATR14 / close                    갭 포함 실질 변동폭 (True Range 의 14일 평균)
+  [us — 해외 지수]  (2라운드, KAIS 2021)
+    sp_ret1, sp_ret5 : S&P500 1·5일 수익률. 미국 장은 한국 장 마감 뒤 ~ 다음날 새벽에 끝나므로
+                       한국 거래일 t 에는 **미국 날짜 ≤ t-1 인 마지막 종가**까지만 쓴다 (룩어헤드 방지).
+  [market_vk] (vkospi.csv 있을 때만)  vkospi_ma20_ratio
+  [flow] (<code>_flow.csv 있을 때만)  frgn5, frgn20, inst20 — 외국인·기관 순매수금액 / 거래대금
 """
 import argparse
 from pathlib import Path
@@ -33,8 +37,11 @@ OUT = Path(__file__).resolve().parents[2] / "out"
 
 STRUCTURE = ["close_ma200_ratio", "close_hi252_ratio", "vol5_vol20", "hl_range"]
 MARKET = ["kospi_ret5", "kospi_ret20", "rel20"]
+VOL = ["vol_regime", "z_ret", "atr14_ratio"]
+US = ["sp_ret1", "sp_ret5"]
 MARKET_VK = ["vkospi_ma20_ratio"]
 FLOW = ["frgn5", "frgn20", "inst20"]
+ALL_EXTRA = STRUCTURE + MARKET + VOL + US + MARKET_VK + FLOW
 
 
 def add_structure(f: pd.DataFrame) -> pd.DataFrame:
@@ -47,11 +54,41 @@ def add_structure(f: pd.DataFrame) -> pd.DataFrame:
     return f
 
 
+def add_vol(f: pd.DataFrame) -> pd.DataFrame:
+    close = f["close"]
+    r1 = close.pct_change()
+    sd20 = r1.rolling(20).std()
+    f["vol_regime"] = sd20 / r1.rolling(250).std() - 1
+    f["z_ret"] = r1 / sd20
+    prev_close = close.shift(1)
+    tr = pd.concat([f["high"] - f["low"],
+                    (f["high"] - prev_close).abs(),
+                    (f["low"] - prev_close).abs()], axis=1).max(axis=1)
+    f["atr14_ratio"] = tr.rolling(14).mean() / close
+    return f
+
+
 def add_market(f: pd.DataFrame, kospi: pd.Series) -> pd.DataFrame:
     k = kospi.reindex(f.index)                      # 같은 KRX 거래일 — 빠지면 NaN 으로 남겨 검사에서 드러나게
     f["kospi_ret5"] = k.pct_change(5)
     f["kospi_ret20"] = k.pct_change(20)
     f["rel20"] = f["close"].pct_change(20) - f["kospi_ret20"]
+    return f
+
+
+def add_us(f: pd.DataFrame, sp500: pd.Series) -> pd.DataFrame:
+    """미국 지수 수익률을 한국 거래일에 t-1 정렬로 붙인다.
+
+    미국 날짜 d 의 종가는 한국 시간 d+1 새벽에 확정 → 한국 거래일 t 에서 쓸 수 있는 마지막 미국 종가는 날짜 ≤ t-1.
+    구현: 미국 시계열의 날짜를 하루 뒤로 밀어(d → d+1) '사용 가능 시점'으로 만든 뒤, 한국 거래일에 직전 값으로 채운다.
+    """
+    us = sp500.sort_index()
+    ret = pd.DataFrame({"sp_ret1": us.pct_change(1), "sp_ret5": us.pct_change(5)})
+    ret.index = ret.index + pd.Timedelta(days=1)   # 사용 가능 시점
+    ret = ret[~ret.index.duplicated(keep="last")]
+    aligned = ret.reindex(ret.index.union(f.index)).ffill().reindex(f.index)
+    f["sp_ret1"] = aligned["sp_ret1"]
+    f["sp_ret5"] = aligned["sp_ret5"]
     return f
 
 
@@ -70,40 +107,54 @@ def add_flow(f: pd.DataFrame, flow: pd.DataFrame) -> pd.DataFrame:
     return f
 
 
-def build(code: str) -> pd.DataFrame:
-    f = pd.read_csv(OUT / f"{code}_features.csv", parse_dates=["date"], index_col="date").sort_index()
-    f = f.drop(columns=[c for c in STRUCTURE + MARKET + MARKET_VK + FLOW if c in f.columns])  # 재실행 안전
-    # structure 는 원본 OHLCV(<code>.csv) 로 계산해 features.py 가 버린 앞 59행도 워밍업에 쓴다
-    raw = pd.read_csv(OUT / f"{code}.csv", parse_dates=["date"], index_col="date").sort_index()
-    st = add_structure(raw.copy())[STRUCTURE]
-    f = f.join(st, how="left")
+def load_series(name: str, col: str) -> pd.Series | None:
+    p = OUT / name
+    if not p.exists():
+        return None
+    return pd.read_csv(p, parse_dates=["date"], index_col="date")[col].sort_index()
 
-    kospi = pd.read_csv(OUT / "kospi.csv", parse_dates=["date"], index_col="date")["kospi"]
+
+def build(code: str, raw: pd.DataFrame, feat: pd.DataFrame, kospi: pd.Series,
+          sp500: pd.Series | None, vk: pd.Series | None, flow: pd.DataFrame | None,
+          quiet: bool = False) -> pd.DataFrame:
+    """feat(base8 프레임)에 확장 피처를 붙인다. raw 는 워밍업이 긴 피처(ma200·hi252·vol250)용 원본 OHLCV."""
+    f = feat.drop(columns=[c for c in ALL_EXTRA if c in feat.columns]).copy()   # 재실행 안전
+    long = add_vol(add_structure(raw.copy()))[STRUCTURE + VOL]
+    f = f.join(long, how="left")
     f = add_market(f, kospi)
-
-    if (OUT / "vkospi.csv").exists():
-        vk = pd.read_csv(OUT / "vkospi.csv", parse_dates=["date"], index_col="date")["vkospi"]
+    if sp500 is not None:
+        f = add_us(f, sp500)
+    elif not quiet:
+        print("sp500.csv 없음 → slim5_us 세트 미생성")
+    if vk is not None:
         f = add_market_vk(f, vk)
-    else:
+    elif not quiet:
         print("vkospi.csv 없음 → market_vk 세트 미생성")
-
-    if (OUT / f"{code}_flow.csv").exists():
-        flow = pd.read_csv(OUT / f"{code}_flow.csv", parse_dates=["date"], index_col="date")
+    if flow is not None:
         f = add_flow(f, flow)
-    else:
+    elif not quiet:
         print(f"{code}_flow.csv 없음 → flow 세트 미생성")
+    # structure·market·vol 은 필수: NaN 행 제거 (앞부분 워밍업 + 지수 결측일). 선택 세트는 NaN 을 남긴다.
+    return f.dropna(subset=STRUCTURE + MARKET + VOL)
 
-    # structure·market 은 필수: NaN 행 제거 (앞부분 워밍업 + 지수 결측일). 선택 세트는 NaN 을 남긴다.
-    f = f.dropna(subset=STRUCTURE + MARKET)
-    return f
+
+def load_inputs(code: str):
+    raw = pd.read_csv(OUT / f"{code}.csv", parse_dates=["date"], index_col="date").sort_index()
+    feat = pd.read_csv(OUT / f"{code}_features.csv", parse_dates=["date"], index_col="date").sort_index()
+    kospi = load_series("kospi.csv", "kospi")
+    sp500 = load_series("sp500.csv", "sp500")
+    vk = load_series("vkospi.csv", "vkospi")
+    fp = OUT / f"{code}_flow.csv"
+    flow = pd.read_csv(fp, parse_dates=["date"], index_col="date").sort_index() if fp.exists() else None
+    return raw, feat, kospi, sp500, vk, flow
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--code", default="005930")
     code = ap.parse_args().code
-    f = build(code)
+    f = build(code, *load_inputs(code))
     f.to_csv(OUT / f"{code}_features.csv")
-    new = [c for c in STRUCTURE + MARKET + MARKET_VK + FLOW if c in f.columns]
+    new = [c for c in ALL_EXTRA if c in f.columns]
     print(f"\n{len(f)}행 저장 ({f.index[0].date()} ~ {f.index[-1].date()}) → {OUT / (code + '_features.csv')}")
     print(f"추가 컬럼: {new}")
     print(f[new].describe().T[["mean", "std", "min", "max"]].round(4))
