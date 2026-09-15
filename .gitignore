@@ -4,6 +4,7 @@ __pycache__/
 # out 은 개별 관리: 실험 기록·요약·그림만 커밋
 out/*
 !out/experiments.csv
+!out/experiments_*.csv
 !out/summary.md
 !out/tuning.csv
 !out/fig_*.png

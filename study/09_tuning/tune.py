@@ -70,7 +70,18 @@ def add_extra_features(feat: pd.DataFrame) -> pd.DataFrame:
     return out.dropna()
 
 
-def run_one(train_df, test_df, seed, cfg):
+def with_warmup(feat: pd.DataFrame, test_df: pd.DataFrame, n: int) -> pd.DataFrame:
+    """테스트 구간 앞에 직전 n 거래일을 붙인다 (관측 창 워밍업).
+
+    TradingEnv 는 첫 window 일을 관측 재료로만 쓰고 window 일째부터 거래한다. 워밍업 없이 테스트 연도만
+    넣으면 에이전트는 1~3월을 건너뛴 채 시작하는데 B&H 는 1월 첫날부터 계산되어 비교가 어긋난다
+    (예: 2019 삼성전자 연간 +44% vs 20일째부터 +20%). 직전 n 일은 과거 데이터라 룩어헤드가 아니다.
+    """
+    start = feat.index.get_loc(test_df.index[0])
+    return feat.iloc[max(0, start - n): start + len(test_df)]
+
+
+def run_one(train_df, test_df, seed, cfg, feat):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     fcols = FSETS[cfg.features]
     env = TradingEnv(train_df, window=cfg.window, features=fcols)
@@ -85,13 +96,15 @@ def run_one(train_df, test_df, seed, cfg):
             agent.remember(s, a, r, s2, done)
             agent.train_step()
             s = s2
-    test_env = TradingEnv(test_df, window=cfg.window, features=fcols)
+    test_ext = with_warmup(feat, test_df, cfg.window)           # 워밍업 window 일 + 테스트 연도 전체
+    test_env = TradingEnv(test_ext, window=cfg.window, features=fcols)
     s, done = test_env.reset(), False
-    pv = [test_env.asset]
+    pv = [test_env.asset]                                        # t=window = 테스트 연도 첫 거래일
     while not done:
         s, _, done = test_env.step(agent.act(s, explore=False))
         pv.append(test_env.asset)
-    pv = pd.Series(pv, index=test_df.index[test_env.window - 1:test_env.t])
+    pv = pd.Series(pv, index=test_ext.index[test_env.window:test_env.t + 1])
+    assert pv.index[0] == test_df.index[0] and len(pv) == len(test_df), "평가 구간이 테스트 연도와 어긋남"
     return pv, test_env.trades
 
 
@@ -101,7 +114,7 @@ def run_config(feat, cfg, years, seeds, code):
     for year, (train_df, test_df) in folds.items():
         bh_ret = cumulative_return(buy_and_hold_pv(test_df["close"]))
         for seed in seeds:
-            pv, trades = run_one(train_df, test_df, seed, cfg)
+            pv, trades = run_one(train_df, test_df, seed, cfg, feat)
             ret = cumulative_return(pv)
             rows.append({"time": datetime.now().strftime("%m-%d %H:%M"), "code": code,
                          "test_year": year, "seed": seed,
