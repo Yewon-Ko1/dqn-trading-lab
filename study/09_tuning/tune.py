@@ -46,9 +46,9 @@ CSV = ROOT / "out" / "tuning.csv"
 COLS = ["time", "code", "test_year", "seed",
         "episodes", "window", "features", "hidden", "lr", "gamma",
         "target_every", "eps_decay",
-        "ret", "excess_bh", "sortino", "mdd", "trades", "data_hash", "train_len", "churn", "penalty"]
+        "ret", "excess_bh", "sortino", "mdd", "trades", "data_hash", "train_len", "churn", "penalty", "n_step"]
 CFG_KEYS = ["episodes", "window", "features", "hidden", "lr", "gamma", "target_every", "eps_decay",
-            "train_len", "churn", "penalty"]
+            "train_len", "churn", "penalty", "n_step"]
 
 # D-03.5 잦은 매매 변형: (extra_state, min_hold)
 CHURN = {"none": (False, 0), "state": (True, 0), "hold3": (False, 3), "hold10": (False, 10),
@@ -82,7 +82,7 @@ def load_log() -> pd.DataFrame:
         if c not in df.columns:
             df[c] = np.nan
     # 옵션이 생기기 전의 행은 정의상 기본값으로 실행된 것 → 기본값으로 채워야 resume 이 재사용한다
-    for c, default in [("train_len", 3), ("churn", "none"), ("penalty", 0.0)]:
+    for c, default in [("train_len", 3), ("churn", "none"), ("penalty", 0.0), ("n_step", 1)]:
         if df[c].isna().any():
             df[c] = df[c].fillna(default); changed = True
     df = df[COLS]
@@ -154,7 +154,7 @@ def run_one(train_df, test_df, seed, cfg, feat):
                      trade_penalty=cfg.penalty)
     agent = DQNAgent(state_dim=len(env.reset()), gamma=cfg.gamma, lr=cfg.lr,
                      hidden=cfg.hidden, target_every=cfg.target_every,
-                     eps_decay=cfg.eps_decay)
+                     eps_decay=cfg.eps_decay, n_step=cfg.n_step)
     for _ in range(cfg.episodes):
         s, done = env.reset(), False
         while not done:
@@ -206,7 +206,8 @@ def run_config(feat, cfg, years, seeds, code, data_hash=None, resume=False):
                    "ret": round(ret, 4), "excess_bh": round(ret - bh_ret, 4),
                    "sortino": round(sortino(pv), 3),
                    "mdd": round(max_drawdown(pv), 4), "trades": trades, "data_hash": data_hash,
-                   "train_len": cfg.train_len, "churn": cfg.churn, "penalty": cfg.penalty}
+                   "train_len": cfg.train_len, "churn": cfg.churn, "penalty": cfg.penalty,
+                   "n_step": cfg.n_step}
             pd.DataFrame([row], columns=COLS).to_csv(CSV, mode="a", header=not CSV.exists(), index=False)  # 한 줄씩 즉시 기록
             rows.append(row)
             print(f"  [{year}] seed {seed}: {ret:+.2%} (초과 {ret - bh_ret:+.2%}, 거래 {trades})")
@@ -246,6 +247,8 @@ def main():
     ap.add_argument("--eps-decay", type=float, default=0.999)
     ap.add_argument("--train-len", type=int, default=3,
                     help="학습 구간 연수 (D-03.7). 0 = 가용 전체(2013~). 기본 3")
+    ap.add_argument("--n-step", type=int, default=1,
+                    help="n-step return (D-09). 1 이면 기존 1-step TD 와 완전히 동일")
     ap.add_argument("--penalty", type=float, default=0.0,
                     help="D-03.6 매매 1회당 보상 패널티 (학습 신호만, 자산 무관). 기본 0")
     ap.add_argument("--churn", choices=list(CHURN), default="none",
@@ -284,7 +287,8 @@ def main():
         caster = {"episodes": int, "window": int, "hidden": int,
                   "lr": float, "gamma": float, "target_every": int,
                   "eps_decay": float, "features": str,
-                  "train_len": int, "churn": str, "penalty": float}[param]
+                  "train_len": int, "churn": str, "penalty": float,
+                  "n_step": int}[param]
         if param == "features":
             for v in values:
                 check_set(v)

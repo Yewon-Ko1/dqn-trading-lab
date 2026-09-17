@@ -46,7 +46,7 @@ TIE = 0.03
 
 # 체인 시작 설정 (D-01~D-03.5 확정값)
 BASE = {"episodes": 10, "window": 10, "features": "slim5", "hidden": 64, "lr": 1e-3, "gamma": 0.99,
-        "target_every": 500, "eps_decay": 0.999, "train_len": 3, "churn": "hold10", "penalty": 0.0}
+        "target_every": 500, "eps_decay": 0.999, "train_len": 3, "churn": "hold10", "penalty": 0.0, "n_step": 1}
 
 # 단계 정의: name, 바꾸는 키(들), 후보(dict 목록), prefer(단순한 순서, 인덱스 작을수록 단순)
 STAGES = [

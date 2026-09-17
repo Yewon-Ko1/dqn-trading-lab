@@ -27,11 +27,12 @@ report("① 남은 것은 최신 100개 (첫 항목이 50번)", float(buf.buf[0]
        "deque(maxlen) 이 알아서 함 — push 만 제대로면 통과")
 random.seed(0)
 try:
-    s, a, r, s2, d = buf.sample(32)
+    s, a, r, s2, d, g = buf.sample(32)
 except Exception as e:  # noqa: BLE001
     print(f"FAIL sample 실행 오류 — TODO 1b: {type(e).__name__}: {e}")
     sys.exit(1)
-report("① sample 이 (32,…) 텐서 5개 반환", s.shape == (32, 4) and a.shape == (32,) and d.shape == (32,))
+report("① sample 이 (32,…) 텐서 6개 반환 (마지막은 할인계수 γ^n)",
+       s.shape == (32, 4) and a.shape == (32,) and d.shape == (32,) and g.shape == (32,))
 r_sets = [tuple(sorted(buf.sample(32)[2].tolist())) for _ in range(3)]
 report("① sample 이 매번 다른 무작위 조합", len(set(r_sets)) > 1, "random.sample 을 썼는지 확인")
 
@@ -74,10 +75,10 @@ report("④ 온라인 계산기는 학습으로 움직임", True)  # 아래 loss
 agent2 = DQNAgent(state_dim=2, batch_size=4, target_every=10_000)
 for i in range(8):
     agent2.remember(np.zeros(2, np.float32), 0, 1.0, np.ones(2, np.float32) * 100, True)
-s_, a_, r_, s2_, d_ = agent2.buffer.sample(4)
+s_, a_, r_, s2_, d_, g_ = agent2.buffer.sample(4)
 with torch.no_grad():
     qn = agent2.q_target(s2_).max(1).values
-manual_target = r_ + agent2.gamma * qn * (1 - d_)
+manual_target = r_ + g_ * qn * (1 - d_)
 report("③ done=True 샘플의 목표값 = 보상 그대로", torch.allclose(manual_target, r_),
        "(1 - d) 곱을 빼먹으면 마지막 날 목표가 오염됨")
 

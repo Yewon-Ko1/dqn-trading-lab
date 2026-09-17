@@ -8,6 +8,8 @@ out/*
 !out/summary.md
 !out/tuning.csv
 !out/diag.csv
+!out/random_ctrl.csv
+!out/blocked_exit.csv
 !out/README.md
 !out/auto_chain.md
 !out/archive/

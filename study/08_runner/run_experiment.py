@@ -30,15 +30,19 @@ from metrics import cumulative_return, max_drawdown, sharpe, sortino  # noqa: E4
 from baselines import buy_and_hold_pv, ma_crossover_pv, cash_pv, fixed_exposure_pv  # noqa: E402
 from trading_env import TradingEnv  # noqa: E402
 from dqn import DQNAgent  # noqa: E402
-from tune import FSETS, CHURN, add_extra_features, with_warmup  # noqa: E402
+from tune import FSETS, CHURN, add_extra_features, with_warmup, data_fingerprint, same  # noqa: E402
 
 CSV = ROOT / "out" / "experiments.csv"
 COLS = ["time", "code", "model", "test_year", "seed", "episodes",
         "ret", "excess_bh", "sharpe", "sortino", "mdd", "trades",
-        "window", "features", "hidden", "lr", "gamma", "train_len", "churn", "penalty"]
+        "window", "features", "hidden", "lr", "gamma", "train_len", "churn", "penalty",
+        "n_step", "data_hash"]
+# resume 의 설정 일치 판정에 쓰는 열 (data_hash 는 별도 비교)
+CFG_NUM = ["episodes", "window", "hidden", "lr", "gamma", "train_len", "penalty", "n_step"]
+CFG_STR = ["features", "churn"]
 
 
-def metrics_row(model, year, seed, episodes, pv, trades, bh_ret, code="005930", cfg=None):
+def metrics_row(model, year, seed, episodes, pv, trades, bh_ret, code="005930", cfg=None, data_hash=None):
     row = {"time": datetime.now().strftime("%m-%d %H:%M"), "code": code, "model": model,
            "test_year": year, "seed": seed, "episodes": episodes,
            "ret": round(cumulative_return(pv), 4),
@@ -48,7 +52,8 @@ def metrics_row(model, year, seed, episodes, pv, trades, bh_ret, code="005930", 
     if cfg is not None:
         row.update({"window": cfg.window, "features": cfg.features, "hidden": cfg.hidden,
                     "lr": cfg.lr, "gamma": cfg.gamma, "train_len": cfg.train_len,
-                    "churn": cfg.churn, "penalty": cfg.penalty})
+                    "churn": cfg.churn, "penalty": cfg.penalty, "n_step": cfg.n_step})
+    row["data_hash"] = data_hash
     return row
 
 
@@ -63,6 +68,40 @@ def ma_crossover_in_year(close_ext: pd.Series, test_index, short=20, long=60):
     return pv, trades
 
 
+def load_log() -> pd.DataFrame:
+    """experiments.csv 를 COLS 형식으로 읽는다. 열이 추가되기 전의 옛 행은 기본값으로 채운다."""
+    if not CSV.exists():
+        return pd.DataFrame(columns=COLS)
+    df = pd.read_csv(CSV)
+    changed = list(df.columns) != COLS
+    for c in COLS:
+        if c not in df.columns:
+            df[c] = np.nan
+    for c, default in [("train_len", 3), ("churn", "none"), ("penalty", 0.0), ("n_step", 1)]:
+        if df[c].isna().any():
+            df[c] = df[c].fillna(default); changed = True
+    df = df[COLS]
+    if changed:
+        df.to_csv(CSV, index=False)          # 형식 통일 (내용은 그대로)
+    return df
+
+
+def done_mask(log, code, model, year, cfg, data_hash):
+    """이미 기록된 실행인지. cfg=None 이면 기준선(설정 무관, 데이터만 같으면 재사용)."""
+    if len(log) == 0:
+        return pd.Series([], dtype=bool)
+    m = ((log["code"].astype(str).str.zfill(6) == str(code).zfill(6))   # CSV 는 앞 0 을 잃는다
+         & (log["model"].astype(str) == str(model))
+         & (pd.to_numeric(log["test_year"], errors="coerce") == year)
+         & (log["data_hash"].astype(str) == str(data_hash)))
+    if cfg is not None:
+        for k in CFG_NUM:
+            m &= same(log[k], getattr(cfg, k))
+        for k in CFG_STR:
+            m &= log[k].astype(str) == str(getattr(cfg, k))
+    return m
+
+
 def append_rows(rows):
     df = pd.DataFrame(rows, columns=COLS)
     df.to_csv(CSV, mode="a", header=not CSV.exists(), index=False)
@@ -75,7 +114,8 @@ def run_agent(train_df, test_df, seed, episodes, double, cfg, feat):
     env = TradingEnv(train_df, window=cfg.window, features=fcols, extra_state=extra_state,
                      min_hold=min_hold, trade_penalty=cfg.penalty)
     agent = DQNAgent(state_dim=len(env.reset()), double=double, gamma=cfg.gamma, lr=cfg.lr,
-                     hidden=cfg.hidden, target_every=cfg.target_every, eps_decay=cfg.eps_decay)
+                     hidden=cfg.hidden, target_every=cfg.target_every, eps_decay=cfg.eps_decay,
+                     n_step=cfg.n_step)
     for _ in range(episodes):                       # 학습
         s, done = env.reset(), False
         while not done:
@@ -116,6 +156,10 @@ def main():
     ap.add_argument("--train-len", type=int, default=3, help="학습 구간 연수, 0 = 가용 전체")
     ap.add_argument("--churn", choices=list(CHURN), default="none")
     ap.add_argument("--penalty", type=float, default=0.0)
+    ap.add_argument("--n-step", type=int, default=1,
+                    help="n-step return (D-09). 1 이면 기존 1-step TD 와 동일")
+    ap.add_argument("--resume", action="store_true",
+                    help="같은 설정·같은 데이터로 이미 기록된 (연도, 모델, 시드) 는 건너뛰고 재사용")
     args = ap.parse_args()
     if args.quick:
         args.seeds, args.years, args.episodes = [1], [2024], 2
@@ -125,29 +169,46 @@ def main():
     feat = add_extra_features(feat)             # plus10 컬럼 (다른 세트에는 영향 없음)
     train_len = 30 if args.train_len == 0 else args.train_len
     folds = {te.index[0].year: (tr, te) for tr, te in make_folds(feat, args.years, train_len=train_len)}
+    data_hash = data_fingerprint(feat, FSETS[args.features])
+    log = load_log() if args.resume else pd.DataFrame(columns=COLS)
+    if args.resume:
+        print(f"resume: 기존 기록 {len(log)}행 | data_hash {data_hash}")
 
-    all_rows = []
+    all_rows, reused = [], 0
     for year, (train_df, test_df) in folds.items():
         close = test_df["close"]
         bh = buy_and_hold_pv(close); bh_ret = cumulative_return(bh)
         ma_pv, ma_tr = ma_crossover_in_year(with_warmup(feat, test_df, 60)["close"], test_df.index)
-        base = [metrics_row("buy_hold", year, 0, 0, bh, None, bh_ret, args.code),
-                metrics_row("ma_cross", year, 0, 0, ma_pv, ma_tr, bh_ret, args.code),
-                metrics_row("cash", year, 0, 0, cash_pv(close), 0, bh_ret, args.code),
-                metrics_row("fixed50", year, 0, 0, fixed_exposure_pv(close), None, bh_ret, args.code)]
-        append_rows(base); all_rows += base
-        print(f"[{year}] 기준선 4종 기록 (B&H {bh_ret:+.2%})")
+        base = []
+        for name, pv_, tr_ in [("buy_hold", bh, None), ("ma_cross", ma_pv, ma_tr),
+                               ("cash", cash_pv(close), 0), ("fixed50", fixed_exposure_pv(close), None)]:
+            if args.resume:
+                hit = log[done_mask(log, args.code, name, year, None, data_hash)]
+                if len(hit):
+                    all_rows += hit.to_dict(orient="records"); reused += len(hit); continue
+            base.append(metrics_row(name, year, 0, 0, pv_, tr_, bh_ret, args.code, data_hash=data_hash))
+        if base:
+            append_rows(base); all_rows += base
+        print(f"[{year}] 기준선 4종 (B&H {bh_ret:+.2%})")
 
         for model in args.models:
             curves = {}
             for seed in args.seeds:
+                if args.resume:
+                    m = done_mask(log, args.code, model, year, args, data_hash)
+                    hit = log[m & (pd.to_numeric(log["seed"], errors="coerce") == seed)]
+                    if len(hit):
+                        all_rows += hit.to_dict(orient="records"); reused += len(hit); continue
                 pv, trades = run_agent(train_df, test_df, seed, args.episodes,
                                        double=(model == "double"), cfg=args, feat=feat)
-                row = metrics_row(model, year, seed, args.episodes, pv, trades, bh_ret, args.code, cfg=args)
+                row = metrics_row(model, year, seed, args.episodes, pv, trades, bh_ret, args.code,
+                                  cfg=args, data_hash=data_hash)
                 append_rows([row]); all_rows.append(row)
                 curves[seed] = pv
                 print(f"[{year}] {model} seed {seed}: {row['ret']:+.2%} "
                       f"(초과 {row['excess_bh']:+.2%}, 거래 {row['trades']})")
+            if not curves:                          # 전부 재사용 → 그림은 이미 있음
+                continue
             try:                                    # 시드별 자산 곡선 그림
                 import matplotlib
                 matplotlib.use("Agg")
@@ -168,7 +229,8 @@ def main():
     lines = ["# 실험 요약 (이번 실행분)", "",
              f"folds {args.years} × seeds {args.seeds} × episodes {args.episodes} | "
              f"window {args.window} features {args.features} hidden {args.hidden} lr {args.lr} γ {args.gamma} "
-             f"train_len {args.train_len} churn {args.churn} penalty {args.penalty}", "",
+             f"train_len {args.train_len} churn {args.churn} penalty {args.penalty} "
+             f"n_step {args.n_step} | data_hash {data_hash}", "",
              "| 전략 | 수익률 | B&H 대비 초과 | Sortino | MDD | 거래 |",
              "|---|---|---|---|---|---|"]
     for model, g in df.groupby("model"):
@@ -180,6 +242,8 @@ def main():
                      f"{ms('sortino', pct=False)} | {ms('mdd')} | {g['trades'].mean():.0f} |")
     out_md = ROOT / "out" / "summary.md"
     out_md.write_text("\n".join(lines), encoding="utf-8")
+    if reused:
+        print(f"(resume) 기록된 {reused}행 재사용")
     print(f"\n요약: {out_md}\n전체 기록: {CSV}")
     print("\n".join(lines[4:]))
 
