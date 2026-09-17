@@ -4,7 +4,7 @@
 > 이 단계의 목표는 "rltrader DQN이 무엇을 생략했는지"를 정확히 알고, 생략된 네 가지를 채워 넣어 표준 DQN을 만드는 것이다.
 > 논문에서 "DQN"이라고 쓰면 심사자는 표준 DQN을 기대한다. 팀 코드 `backend/app/rl/agents/dqn.py`도 표준 쪽이다.
 
-## 0. 먼저 rltrader의 DQNLearner를 다시 읽어 보자
+## 0. 먼저 rltrader의 DQNLearner를 다시 읽어 보면
 
 `learners.py` 371~394행. 흐름은 이렇다.
 
@@ -35,7 +35,7 @@ for i, (sample, action, value, reward) in enumerate(reversed(memory)):
 
 정리하면 rltrader는 "에피소드 단위 몬테카를로 회귀"에 가깝고, 표준 DQN은 "스텝 단위 TD 학습"이다. 둘 다 Q값을 신경망으로 근사한다는 점만 같다.
 
-## 2. 표준 DQN 한 스텝의 흐름 (이걸 화이트보드에 그릴 수 있어야 한다)
+## 2. 표준 DQN 한 스텝의 흐름
 
 ```
 state s ──► Q_online(s) ──► ε-greedy ──► action a
