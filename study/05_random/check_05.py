@@ -54,3 +54,6 @@ report("거래가 실제로 일어남 (평균 10회 이상)", np.mean(trades) >=
 report("파산(자산 0 이하) 없음", finals.min() > 0)
 
 print("\n🎉 05단계 통과! 다음은 06(PyTorch 신경망)." if ok else "\n04 환경을 다시 점검하세요.")
+
+if not ok:
+    sys.exit(1)
