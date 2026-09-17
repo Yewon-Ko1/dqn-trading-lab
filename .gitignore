@@ -7,6 +7,7 @@ out/*
 !out/experiments_*.csv
 !out/summary.md
 !out/tuning.csv
+!out/diag.csv
 !out/README.md
 !out/auto_chain.md
 !out/archive/
