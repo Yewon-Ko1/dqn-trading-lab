@@ -7,6 +7,10 @@ out/*
 !out/experiments_*.csv
 !out/summary.md
 !out/tuning.csv
+!out/README.md
+!out/auto_chain.md
+!out/archive/
+!out/archive/**
 !out/kospi.csv
 !out/vkospi.csv
 !out/sp500.csv
