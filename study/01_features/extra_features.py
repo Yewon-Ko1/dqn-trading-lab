@@ -21,6 +21,8 @@
     vol_regime  : std20(ret1) / std250(ret1) - 1   단기 변동성이 1년 평균 대비 얼마나 높은가
     z_ret       : ret1 / std20(ret1)               표준화 일간 수익률 — 오늘이 몇 σ 짜리 날인가
     atr14_ratio : ATR14 / close                    갭 포함 실질 변동폭 (True Range 의 14일 평균)
+  [gated — 국면 조건부]  (D-03.9)
+    close_ma200_ratio_g, close_hi252_ratio_g : vol_regime > 0(스트레스 국면)일 때만 값, 아니면 0.
   [us — 해외 지수]  (2라운드, KAIS 2021)
     sp_ret1, sp_ret5 : S&P500 1·5일 수익률. 미국 장은 한국 장 마감 뒤 ~ 다음날 새벽에 끝나므로
                        한국 거래일 t 에는 **미국 날짜 ≤ t-1 인 마지막 종가**까지만 쓴다 (룩어헤드 방지).
@@ -38,10 +40,11 @@ OUT = Path(__file__).resolve().parents[2] / "out"
 STRUCTURE = ["close_ma200_ratio", "close_hi252_ratio", "vol5_vol20", "hl_range"]
 MARKET = ["kospi_ret5", "kospi_ret20", "rel20"]
 VOL = ["vol_regime", "z_ret", "atr14_ratio"]
+GATED = ["close_ma200_ratio_g", "close_hi252_ratio_g"]   # D-03.9: 변동성 국면(vol_regime > 0)일 때만 켜지는 장기 피처
 US = ["sp_ret1", "sp_ret5"]
 MARKET_VK = ["vkospi_ma20_ratio"]
 FLOW = ["frgn5", "frgn20", "inst20"]
-ALL_EXTRA = STRUCTURE + MARKET + VOL + US + MARKET_VK + FLOW
+ALL_EXTRA = STRUCTURE + MARKET + VOL + GATED + US + MARKET_VK + FLOW
 
 
 def add_structure(f: pd.DataFrame) -> pd.DataFrame:
@@ -65,6 +68,15 @@ def add_vol(f: pd.DataFrame) -> pd.DataFrame:
                     (f["high"] - prev_close).abs(),
                     (f["low"] - prev_close).abs()], axis=1).max(axis=1)
     f["atr14_ratio"] = tr.rolling(14).mean() / close
+    return f
+
+
+def add_gated(f: pd.DataFrame) -> pd.DataFrame:
+    """국면 조건부 피처: 20일 변동성이 1년 평균보다 높을 때(스트레스 국면)만 장기 국면 피처를 보여준다.
+    시그널(vol_regime)은 그날까지의 데이터로만 계산되므로 룩어헤드 없음. 임계값 0 은 '1년 평균'이라 튜닝할 숫자가 없다."""
+    gate = (f["vol_regime"] > 0).astype(np.float32)
+    f["close_ma200_ratio_g"] = f["close_ma200_ratio"] * gate
+    f["close_hi252_ratio_g"] = f["close_hi252_ratio"] * gate
     return f
 
 
@@ -119,7 +131,7 @@ def build(code: str, raw: pd.DataFrame, feat: pd.DataFrame, kospi: pd.Series,
           quiet: bool = False) -> pd.DataFrame:
     """feat(base8 프레임)에 확장 피처를 붙인다. raw 는 워밍업이 긴 피처(ma200·hi252·vol250)용 원본 OHLCV."""
     f = feat.drop(columns=[c for c in ALL_EXTRA if c in feat.columns]).copy()   # 재실행 안전
-    long = add_vol(add_structure(raw.copy()))[STRUCTURE + VOL]
+    long = add_gated(add_vol(add_structure(raw.copy())))[STRUCTURE + VOL + GATED]
     f = f.join(long, how="left")
     f = add_market(f, kospi)
     if sp500 is not None:
@@ -135,7 +147,7 @@ def build(code: str, raw: pd.DataFrame, feat: pd.DataFrame, kospi: pd.Series,
     elif not quiet:
         print(f"{code}_flow.csv 없음 → flow 세트 미생성")
     # structure·market·vol 은 필수: NaN 행 제거 (앞부분 워밍업 + 지수 결측일). 선택 세트는 NaN 을 남긴다.
-    return f.dropna(subset=STRUCTURE + MARKET + VOL)
+    return f.dropna(subset=STRUCTURE + MARKET + VOL + GATED)
 
 
 def load_inputs(code: str):

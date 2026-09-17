@@ -16,7 +16,8 @@ class TradingEnv:
                  balance: int = 10_000_000,
                  commission: float = 0.00015, tax: float = 0.0025,
                  features: list | None = None,
-                 extra_state: bool = False, min_hold: int = 0):
+                 extra_state: bool = False, min_hold: int = 0,
+                 trade_penalty: float = 0.0):
         """df: FEATURES 컬럼 + 'close' 컬럼을 가진 DataFrame (01~02단계 산출물)
 
         features: 사용할 피처 컬럼 목록. None 이면 기본 FEATURES 8종 (기존 동작 그대로).
@@ -27,6 +28,9 @@ class TradingEnv:
                        에이전트가 "방금 샀다"를 보고 되팔기 비용을 스스로 배우게 하는 부드러운 방식.
           min_hold:    매수 후 이 거래일 수가 지나기 전에는 SELL 을 HOLD 로 처리(액션 마스킹).
                        되팔기를 막는 딱딱한 방식. 0 이면 제약 없음.
+          trade_penalty: (D-03.6) 매매가 실제로 체결된 스텝의 보상에서 이 값을 뺀다. 자산·수익률에는 영향 없음 —
+                       학습 신호에만 비용을 과장해 넣어 에이전트가 되팔기 비용을 스스로 배우게 하는 부드러운 방식.
+                       0 이면 기존 보상 그대로. (실제 비용 0.265%/왕복은 하루 변동 2% 에 묻혀 신호가 되지 못한다는 가설)
         """
         cols = FEATURES if features is None else list(features)
         self.features = df[cols].values.astype(np.float32)      # (일수, 피처수)
@@ -37,6 +41,7 @@ class TradingEnv:
         self.tax = tax
         self.extra_state = extra_state
         self.min_hold = min_hold
+        self.trade_penalty = trade_penalty
 
     # ── 에피소드 시작 ────────────────────────────────────────────
     def reset(self):
@@ -72,6 +77,7 @@ class TradingEnv:
     def step(self, action: int):
         """행동 집행 → 하루 전진 → 보상 계산. 반환: (새 state, reward, done)"""
         price = self.prices[self.t]
+        trades_before = self.trades
 
         if action == self.SELL and self.shares > 0 and self.hold_days < self.min_hold:
             action = self.HOLD                                 # D-03.5: 최소 보유기간 마스킹
@@ -114,6 +120,8 @@ class TradingEnv:
         #   reward = 새 자산 / 직전 자산(self.asset) - 1
         #   self.asset = new_asset
         reward = new_asset / self.asset - 1
+        if self.trades > trades_before:                        # D-03.6: 체결된 스텝에만 패널티
+            reward -= self.trade_penalty
         self.asset = new_asset
 
         done = self.t >= len(self.prices) - 1

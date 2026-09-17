@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from extra_features import (ALL_EXTRA, STRUCTURE, MARKET, VOL, US, build, load_inputs)  # noqa: E402
+from extra_features import (ALL_EXTRA, STRUCTURE, MARKET, VOL, GATED, US, build, load_inputs)  # noqa: E402
 
 OUT = Path(__file__).resolve().parents[2] / "out"
 ap = argparse.ArgumentParser(); ap.add_argument("--code", default="005930")
@@ -37,7 +37,7 @@ for c in present:
     ok &= same
 
 # 2. 필수 세트 결측
-for c in STRUCTURE + MARKET + VOL:
+for c in STRUCTURE + MARKET + VOL + GATED:
     n = int(f[c].isna().sum()); print(f"[{'OK' if n == 0 else 'FAIL'}] NaN 0개: {c} ({n})"); ok &= n == 0
 
 # 3. 스케일: 비율형이면 |평균| < 1, std 가 0 이 아님 (z_ret 은 표준화 값이라 |평균| < 1 이면 충분)
@@ -50,6 +50,9 @@ for c in present:
 print(f"[{'OK' if (f['close_hi252_ratio'] <= 1e-12).all() else 'FAIL'}] close_hi252_ratio ≤ 0")
 print(f"[{'OK' if (f['hl_range'] >= 0).all() else 'FAIL'}] hl_range ≥ 0")
 print(f"[{'OK' if (f['atr14_ratio'] > 0).all() else 'FAIL'}] atr14_ratio > 0")
+gate_on = (f["vol_regime"] > 0).mean()
+print(f"[{'OK' if 0.2 < gate_on < 0.8 else 'WARN'}] 국면 게이트 켜진 비율 {gate_on:.0%} (20~80% 범위면 정상)")
+print(f"[{'OK' if ((f['vol_regime'] <= 0) <= (f['close_ma200_ratio_g'] == 0)).all() else 'FAIL'}] 게이트 꺼진 날 gated 피처 = 0")
 
 # 5. 미국 지수 정렬 (t-1): 무작위 30일을 뽑아 직접 계산한 값과 비교
 if sp500 is not None and "sp_ret1" in f.columns:
@@ -57,6 +60,7 @@ if sp500 is not None and "sp_ret1" in f.columns:
     rng = np.random.default_rng(0)
     bad = 0
     for t in rng.choice(f.index[300:], 30, replace=False):
+        t = pd.Timestamp(t)
         last_us = us_ret1.loc[:t - pd.Timedelta(days=1)].dropna()
         expect = last_us.iloc[-1]
         if not np.isclose(f.loc[t, "sp_ret1"], expect, equal_nan=True):

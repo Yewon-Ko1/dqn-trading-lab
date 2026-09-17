@@ -1,10 +1,10 @@
 """09단계: 하이퍼파라미터 튜닝 실행기. 빈칸 없음.
 
 원칙 (decisions.md 참고):
-  1. 튜닝은 검증 폴드(기본: 테스트 2018 하락·2019 상승·2020 V자)에서만 한다. 평가 연도 2021~2024는
+  1. 튜닝은 검증 폴드(기본: 테스트 2018 하락·2019 상승·2020 V자)에서만 한다. 평가 연도 2021~2025와 2026 보조 구간은
      설정 확정 후 딱 한 번만 다시 돌린다 — 테스트 성적을 보고 고르는 순간 체리피킹이다.
   2. 한 번에 한 변수만 바꾼다. 모든 실행은 설정 전체와 함께 out/tuning.csv 에 기록된다.
-  3. 보고는 시드 10개 평균 ± 표준편차 + 폴드별 순위. 동률 기준 ±3%p, 기본값 유지가 디폴트.
+  3. 자동 체인은 시드 20개 평균 ± 표준편차와 폴드별 결과를 보고한다. 동률 기준 ±3%p, 기본값 유지가 디폴트.
 
 사용 예:
   python study/09_tuning/tune.py                              # 기준 설정, 검증 폴드
@@ -46,18 +46,30 @@ CSV = ROOT / "out" / "tuning.csv"
 COLS = ["time", "code", "test_year", "seed",
         "episodes", "window", "features", "hidden", "lr", "gamma",
         "target_every", "eps_decay",
-        "ret", "excess_bh", "sortino", "mdd", "trades", "data_hash", "train_len", "churn"]
+        "ret", "excess_bh", "sortino", "mdd", "trades", "data_hash", "train_len", "churn", "penalty"]
 CFG_KEYS = ["episodes", "window", "features", "hidden", "lr", "gamma", "target_every", "eps_decay",
-            "train_len", "churn"]
+            "train_len", "churn", "penalty"]
 
 # D-03.5 잦은 매매 변형: (extra_state, min_hold)
 CHURN = {"none": (False, 0), "state": (True, 0), "hold3": (False, 3), "hold10": (False, 10),
          "hold20": (False, 20), "both": (True, 3)}
 
 
-def data_fingerprint(code: str) -> str:
-    """features CSV 의 내용 해시 앞 10자리. 데이터가 바뀌면 값이 바뀌어 옛 행을 재사용하지 않게 한다."""
-    return hashlib.md5((ROOT / "out" / f"{code}_features.csv").read_bytes()).hexdigest()[:10]
+def data_fingerprint(feat: pd.DataFrame, cols) -> str:
+    """실제로 쓰는 열(피처 세트 + OHLCV)의 값 해시 앞 10자리. 데이터가 바뀌면 값이 바뀌어 옛 행을 재사용하지 않게 하고,
+    쓰지 않는 열이 추가되는 것만으로는 바뀌지 않아 resume 재사용이 유지된다."""
+    use = list(cols) + ["open", "high", "low", "close", "volume"]
+    arr = np.ascontiguousarray(feat[use].to_numpy(dtype=np.float64))
+    return hashlib.md5(arr.tobytes() + str(list(feat.index[[0, -1]])).encode()).hexdigest()[:10]
+
+
+def same(col: pd.Series, value) -> pd.Series:
+    """설정값 비교: 숫자는 숫자로(3 == 3.0, 1e-3 == 0.001), 문자열은 문자열로."""
+    try:
+        v = float(value)
+        return pd.to_numeric(col, errors="coerce") == v
+    except (TypeError, ValueError):
+        return col.astype(str) == str(value)
 
 
 def load_log() -> pd.DataFrame:
@@ -65,11 +77,16 @@ def load_log() -> pd.DataFrame:
     if not CSV.exists():
         return pd.DataFrame(columns=COLS)
     df = pd.read_csv(CSV)
-    if list(df.columns) != COLS:
-        for c in COLS:
-            if c not in df.columns:
-                df[c] = np.nan
-        df = df[COLS]
+    changed = list(df.columns) != COLS
+    for c in COLS:
+        if c not in df.columns:
+            df[c] = np.nan
+    # 옵션이 생기기 전의 행은 정의상 기본값으로 실행된 것 → 기본값으로 채워야 resume 이 재사용한다
+    for c, default in [("train_len", 3), ("churn", "none"), ("penalty", 0.0)]:
+        if df[c].isna().any():
+            df[c] = df[c].fillna(default); changed = True
+    df = df[COLS]
+    if changed:
         df.to_csv(CSV, index=False)          # 형식 통일 (내용은 그대로)
     return df
 
@@ -93,6 +110,9 @@ FSETS = {
                  "sp_ret1", "sp_ret5"],                                          # slim5 + 미국 지수 t-1 (KAIS 2021, sp500.csv 필요)
     "core8": ["ret1", "ret5", "close_ma20_ratio", "vol20", "volume_ma20_ratio",
               "close_ma200_ratio", "frgn20", "hl_range"],                        # 계열별 대표 1개 (flow.csv 필요)
+    # ── D-03.9 국면 조건부 (09-15 사전 등록) ──
+    "slim7_gated": ["ret1", "ret5", "close_ma20_ratio", "vol20", "volume_ma20_ratio",
+                    "close_ma200_ratio_g", "close_hi252_ratio_g"],              # 변동성 스트레스 국면에서만 장기 피처
 }
 
 
@@ -130,7 +150,8 @@ def run_one(train_df, test_df, seed, cfg, feat):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     fcols = FSETS[cfg.features]
     extra_state, min_hold = CHURN[cfg.churn]
-    env = TradingEnv(train_df, window=cfg.window, features=fcols, extra_state=extra_state, min_hold=min_hold)
+    env = TradingEnv(train_df, window=cfg.window, features=fcols, extra_state=extra_state, min_hold=min_hold,
+                     trade_penalty=cfg.penalty)
     agent = DQNAgent(state_dim=len(env.reset()), gamma=cfg.gamma, lr=cfg.lr,
                      hidden=cfg.hidden, target_every=cfg.target_every,
                      eps_decay=cfg.eps_decay)
@@ -154,15 +175,16 @@ def run_one(train_df, test_df, seed, cfg, feat):
     return pv, test_env.trades
 
 
-def run_config(feat, cfg, years, seeds, code, data_hash, resume=False):
+def run_config(feat, cfg, years, seeds, code, data_hash=None, resume=False):
     """설정 하나를 years × seeds 로 실행. resume=True 면 같은 설정·데이터로 이미 기록된 (연도, 시드) 는 건너뛰고 그 행을 재사용."""
+    data_hash = data_fingerprint(feat, FSETS[cfg.features])          # 피처 세트별 지문
     done = pd.DataFrame(columns=COLS)
     if resume:
         log = load_log()
-        same = (log["code"].astype(str).str.zfill(6) == str(code).zfill(6)) & (log["data_hash"] == data_hash)  # CSV 는 앞 0 을 잃는다
+        mask = (log["code"].astype(str).str.zfill(6) == str(code).zfill(6)) & (log["data_hash"] == data_hash)  # CSV 는 앞 0 을 잃는다
         for k in CFG_KEYS:
-            same &= log[k].astype(str) == str(getattr(cfg, k))
-        done = log[same].drop_duplicates(subset=["test_year", "seed"], keep="last")
+            mask &= same(log[k], getattr(cfg, k))
+        done = log[mask].drop_duplicates(subset=["test_year", "seed"], keep="last")
         if len(done):
             print(f"  (resume) 기록된 {len(done)}개 실행 재사용")
     rows = []
@@ -184,7 +206,7 @@ def run_config(feat, cfg, years, seeds, code, data_hash, resume=False):
                    "ret": round(ret, 4), "excess_bh": round(ret - bh_ret, 4),
                    "sortino": round(sortino(pv), 3),
                    "mdd": round(max_drawdown(pv), 4), "trades": trades, "data_hash": data_hash,
-                   "train_len": cfg.train_len, "churn": cfg.churn}
+                   "train_len": cfg.train_len, "churn": cfg.churn, "penalty": cfg.penalty}
             pd.DataFrame([row], columns=COLS).to_csv(CSV, mode="a", header=not CSV.exists(), index=False)  # 한 줄씩 즉시 기록
             rows.append(row)
             print(f"  [{year}] seed {seed}: {ret:+.2%} (초과 {ret - bh_ret:+.2%}, 거래 {trades})")
@@ -212,7 +234,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--code", default="005930")
     ap.add_argument("--years", nargs="+", type=int, default=[2018, 2019, 2020],
-                    help="튜닝 폴드(하락·상승·V자). 평가 연도(2021~2024)는 확정 후에만!")
+                    help="튜닝 폴드(하락·상승·V자). 평가 연도(2021~2025·2026)는 확정 후에만!")
     ap.add_argument("--seeds", nargs="+", type=int, default=list(range(1, 11)))
     ap.add_argument("--episodes", type=int, default=10)
     ap.add_argument("--window", type=int, default=20)
@@ -224,6 +246,8 @@ def main():
     ap.add_argument("--eps-decay", type=float, default=0.999)
     ap.add_argument("--train-len", type=int, default=3,
                     help="학습 구간 연수 (D-03.7). 0 = 가용 전체(2013~). 기본 3")
+    ap.add_argument("--penalty", type=float, default=0.0,
+                    help="D-03.6 매매 1회당 보상 패널티 (학습 신호만, 자산 무관). 기본 0")
     ap.add_argument("--churn", choices=list(CHURN), default="none",
                     help="D-03.5 잦은 매매 변형: none | state(보유일수·손익 상태) | hold3 | hold10 | hold20 | both")
     ap.add_argument("--sweep", nargs="+", default=None,
@@ -239,9 +263,8 @@ def main():
     feat = pd.read_csv(ROOT / "out" / f"{args.code}_features.csv",
                        parse_dates=["date"], index_col="date")
     feat = add_extra_features(feat)         # plus10 컬럼 추가 (다른 세트에는 영향 없음)
-    data_hash = data_fingerprint(args.code)
     load_log()                              # 옛 형식 파일이면 열을 맞춰 둔다
-    print(f"데이터 지문 {data_hash} ({args.code}_features.csv)")
+    print(f"데이터 지문(기본 세트 {args.features}) {data_fingerprint(feat, FSETS[args.features])}")
 
     def check_set(name):
         missing = [c for c in FSETS[name] if c not in feat.columns]
@@ -253,7 +276,7 @@ def main():
 
     if args.sweep is None:
         check_set(args.features)
-        df = run_config(feat, args, args.years, args.seeds, args.code, data_hash, args.resume)
+        df = run_config(feat, args, args.years, args.seeds, args.code, resume=args.resume)
         summarize(df, f"{args.features} w{args.window} h{args.hidden} "
                       f"lr{args.lr} γ{args.gamma} ep{args.episodes}")
     else:
@@ -261,7 +284,7 @@ def main():
         caster = {"episodes": int, "window": int, "hidden": int,
                   "lr": float, "gamma": float, "target_every": int,
                   "eps_decay": float, "features": str,
-                  "train_len": int, "churn": str}[param]
+                  "train_len": int, "churn": str, "penalty": float}[param]
         if param == "features":
             for v in values:
                 check_set(v)
@@ -269,7 +292,7 @@ def main():
         for v in values:
             setattr(args, param, caster(v))
             print(f"\n===== {param} = {v} =====")
-            df = run_config(feat, args, args.years, args.seeds, args.code, data_hash, args.resume)
+            df = run_config(feat, args, args.years, args.seeds, args.code, resume=args.resume)
             results.append((v, *summarize(df, f"{param}={v}")))   # (값, 평균초과, 시드std, 폴드별, 거래)
         # ── 폴드별 순위 집계 (변동 큰 폴드가 평균을 지배하는 것을 보완) ──
         years_ = sorted(results[0][3])

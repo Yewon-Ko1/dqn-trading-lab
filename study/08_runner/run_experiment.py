@@ -10,7 +10,7 @@
 
 산출물: out/experiments.csv (전 실행 기록, 이어쓰기)
         out/summary.md      (모델·기준선 × 지표, 평균±표준편차 — 논문 표 초안)
-        out/fig_<model>_<year>.png (시드 5개 자산 곡선)
+        out/fig_<code>_<model>_<year>.png (실행한 시드별 자산 곡선)
 """
 import argparse
 import random
@@ -30,12 +30,12 @@ from metrics import cumulative_return, max_drawdown, sharpe, sortino  # noqa: E4
 from baselines import buy_and_hold_pv, ma_crossover_pv, cash_pv, fixed_exposure_pv  # noqa: E402
 from trading_env import TradingEnv  # noqa: E402
 from dqn import DQNAgent  # noqa: E402
-from tune import FSETS, add_extra_features, with_warmup  # noqa: E402
+from tune import FSETS, CHURN, add_extra_features, with_warmup  # noqa: E402
 
 CSV = ROOT / "out" / "experiments.csv"
 COLS = ["time", "code", "model", "test_year", "seed", "episodes",
         "ret", "excess_bh", "sharpe", "sortino", "mdd", "trades",
-        "window", "features", "hidden", "lr", "gamma"]
+        "window", "features", "hidden", "lr", "gamma", "train_len", "churn", "penalty"]
 
 
 def metrics_row(model, year, seed, episodes, pv, trades, bh_ret, code="005930", cfg=None):
@@ -47,7 +47,8 @@ def metrics_row(model, year, seed, episodes, pv, trades, bh_ret, code="005930", 
            "mdd": round(max_drawdown(pv), 4), "trades": trades}
     if cfg is not None:
         row.update({"window": cfg.window, "features": cfg.features, "hidden": cfg.hidden,
-                    "lr": cfg.lr, "gamma": cfg.gamma})
+                    "lr": cfg.lr, "gamma": cfg.gamma, "train_len": cfg.train_len,
+                    "churn": cfg.churn, "penalty": cfg.penalty})
     return row
 
 
@@ -70,7 +71,9 @@ def append_rows(rows):
 def run_agent(train_df, test_df, seed, episodes, double, cfg, feat):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     fcols = FSETS[cfg.features]
-    env = TradingEnv(train_df, window=cfg.window, features=fcols)
+    extra_state, min_hold = CHURN[cfg.churn]
+    env = TradingEnv(train_df, window=cfg.window, features=fcols, extra_state=extra_state,
+                     min_hold=min_hold, trade_penalty=cfg.penalty)
     agent = DQNAgent(state_dim=len(env.reset()), double=double, gamma=cfg.gamma, lr=cfg.lr,
                      hidden=cfg.hidden, target_every=cfg.target_every, eps_decay=cfg.eps_decay)
     for _ in range(episodes):                       # 학습
@@ -82,7 +85,8 @@ def run_agent(train_df, test_df, seed, episodes, double, cfg, feat):
             agent.train_step()
             s = s2
     test_ext = with_warmup(feat, test_df, cfg.window)   # 워밍업 window 일 + 테스트 연도 전체
-    test_env = TradingEnv(test_ext, window=cfg.window, features=fcols)   # 테스트: ε 무시, 학습 없음
+    test_env = TradingEnv(test_ext, window=cfg.window, features=fcols, extra_state=extra_state,
+                          min_hold=min_hold)                    # 테스트: ε 무시, 학습 없음 (패널티는 학습 신호라 불필요)
     s, done = test_env.reset(), False
     pv = [test_env.asset]
     while not done:
@@ -109,6 +113,9 @@ def main():
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--target-every", type=int, default=500)
     ap.add_argument("--eps-decay", type=float, default=0.999)
+    ap.add_argument("--train-len", type=int, default=3, help="학습 구간 연수, 0 = 가용 전체")
+    ap.add_argument("--churn", choices=list(CHURN), default="none")
+    ap.add_argument("--penalty", type=float, default=0.0)
     args = ap.parse_args()
     if args.quick:
         args.seeds, args.years, args.episodes = [1], [2024], 2
@@ -116,7 +123,8 @@ def main():
     feat = pd.read_csv(ROOT / "out" / f"{args.code}_features.csv",
                        parse_dates=["date"], index_col="date")
     feat = add_extra_features(feat)             # plus10 컬럼 (다른 세트에는 영향 없음)
-    folds = {te.index[0].year: (tr, te) for tr, te in make_folds(feat, args.years)}
+    train_len = 30 if args.train_len == 0 else args.train_len
+    folds = {te.index[0].year: (tr, te) for tr, te in make_folds(feat, args.years, train_len=train_len)}
 
     all_rows = []
     for year, (train_df, test_df) in folds.items():
@@ -159,7 +167,8 @@ def main():
     df = pd.DataFrame(all_rows)
     lines = ["# 실험 요약 (이번 실행분)", "",
              f"folds {args.years} × seeds {args.seeds} × episodes {args.episodes} | "
-             f"window {args.window} features {args.features} hidden {args.hidden} lr {args.lr} γ {args.gamma}", "",
+             f"window {args.window} features {args.features} hidden {args.hidden} lr {args.lr} γ {args.gamma} "
+             f"train_len {args.train_len} churn {args.churn} penalty {args.penalty}", "",
              "| 전략 | 수익률 | B&H 대비 초과 | Sortino | MDD | 거래 |",
              "|---|---|---|---|---|---|"]
     for model, g in df.groupby("model"):

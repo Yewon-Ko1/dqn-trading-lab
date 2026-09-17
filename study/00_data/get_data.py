@@ -36,11 +36,17 @@ print(f"FinanceDataReader: {df.index[0].date()} ~ {df.index[-1].date()} ({len(df
 # ── 데이터 정제 (09-15 추가) ──────────────────────────────────────
 # (1) 액면분할: 네이버 소스는 가격만 소급 조정하고 거래량은 분할 전 주식 수 그대로 둔다.
 #     삼성전자 2018-05-04 50:1 분할 → 그 전 거래량에 50 을 곱해 단위를 맞춘다 (안 하면 분할 후 20일간 volume_ma20_ratio 가 17배).
-SPLITS = {"005930": [("2018-05-04", 50)]}
+SPLITS = {"005930": [("2018-05-04", 50)],      # 삼성전자 50:1
+          "035420": [("2018-10-12", 5)]}       # NAVER 5:1
+# 그 외 종목: 아래 '분할 의심' 경고가 뜨면 확인 후 여기에 추가
 for day, factor in SPLITS.get(code, []):
     before = df.index < pd.Timestamp(day)
     df.loc[before, "volume"] = df.loc[before, "volume"] * factor
     print(f"  액면분할 조정: {day} 이전 거래량 ×{factor} ({before.sum()}행)")
+# (1-b) 분할 의심: 거래량이 직전 20일 평균의 15배를 넘는 날 — 조정 안 된 분할이면 여기 걸린다 (이벤트일 수도 있으니 눈으로 확인)
+sus = df.index[(df["volume"] > 15 * df["volume"].rolling(20).mean().shift(1)).fillna(False)]
+if len(sus):
+    print(f"  ⚠️ 분할 의심(거래량 급증) 날짜: {[d.date().isoformat() for d in sus]} — 분할이면 SPLITS 에 추가")
 # (2) 매매정지일(시가·거래량 0 — 분할 전 3일 등)은 거래가 불가능한 날이므로 행을 뺀다.
 halt = (df["open"] == 0) | (df["volume"] == 0)
 if halt.any():
