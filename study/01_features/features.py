@@ -54,9 +54,12 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    df = load_ohlcv(OUT / "005930.csv")
+    import argparse
+    _ap = argparse.ArgumentParser(); _ap.add_argument("--code", default="005930")
+    _code = _ap.parse_args().code
+    df = load_ohlcv(OUT / f"{_code}.csv")
     feat = make_features(df)
-    feat.to_csv(OUT / "005930_features.csv")
+    feat.to_csv(OUT / f"{_code}_features.csv")
     print(feat.tail())
     print(f"\n{len(df)}행 → {len(feat)}행 (앞부분 NaN 제거됨). 컬럼: {list(feat.columns)}")
     # 값의 크기가 전부 0 근처인지 눈으로 확인:

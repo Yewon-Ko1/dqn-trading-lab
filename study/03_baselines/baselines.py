@@ -63,7 +63,7 @@ def ma_crossover_pv(close: pd.Series, short: int = 20, long: int = 60,
 
     # TODO 5. 신호를 하루 미뤄 포지션으로 만든다 (첫날 NaN 은 False 로).
     #         힌트: signal.shift(1).fillna(False)
-    position = signal.shift(1).fillna(False)
+    position = signal.shift(1, fill_value = False)
 
     ret = close.pct_change().fillna(0)
     strat_ret = ret.where(position, 0.0)            # 보유한 날만 수익률 반영
